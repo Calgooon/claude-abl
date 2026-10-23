@@ -1,0 +1,8 @@
+#!/bin/sh
+# Refuse a commit that carries a key or a .env file. Enable once: git config core.hooksPath .githooks
+if git diff --cached --name-only | grep -qE '(^|/)\.env$|secrets'; then
+  echo "pre-commit: refusing to commit a .env or secrets file" >&2; exit 1
+fi
+if git diff --cached -U0 | grep -E '^\+' | grep -qE 'ak_[A-Za-z0-9]{12,}|sk-[A-Za-z0-9_-]{16,}'; then
+  echo "pre-commit: a line being committed looks like an API key; remove it" >&2; exit 1
+fi

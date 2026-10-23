@@ -1,0 +1,79 @@
+#!/bin/sh
+# Launch Claude Code against abliteration.ai (Anthropic Messages gateway) instead of api.anthropic.com.
+#
+#   claude-abl                                        interactive, model from .env (abliterated-model-large-v2 = GLM-5.3, their best)
+#   claude-abl -p "explain this repo"                 one-shot
+#   ABL_MODEL=abliterated-model claude-abl            pick a smaller/cheaper gateway model
+#   claude-abl --model abliterated-model-large        same thing, per launch
+#
+# Models the gateway serves (GET /v1/models): abliterated-model, abliterated-model-large, abliterated-model-large-v2.
+# Every Claude tier (opus/sonnet/haiku, incl. subagents) is mapped to $ABL_MODEL, so the normal picker just works.
+#
+# Isolation: this uses its own CLAUDE_CONFIG_DIR (./profile) so it never touches your normal Claude Code profile
+# or their OAuth state. Skills, commands, plugins, CLAUDE.md and project transcripts are symlinked from
+# ~/.claude so the experience is the same. settings.json is regenerated from ~/.claude/settings.json on
+# every launch, minus the hooks and status line of your normal profile.
+set -e
+SELF="$0"; [ -L "$SELF" ] && SELF="$(readlink "$SELF")"
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+if [ -f "$DIR/.env" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    k=${line%%=*}; v=${line#*=}
+    eval "[ -n \"\${$k+set}\" ] || export $k=\"\$v\""   # real env wins over .env
+  done < "$DIR/.env"
+fi
+
+PROFILE="$DIR/profile"
+SHARED="$HOME/.claude"
+mkdir -p "$PROFILE"
+for f in CLAUDE.md commands skills plugins projects history.jsonl ide settings.local.json; do
+  [ -e "$SHARED/$f" ] && [ ! -e "$PROFILE/$f" ] && ln -s "$SHARED/$f" "$PROFILE/$f"
+done
+# settings.json: the shared file minus its statusLine and hooks, plus our own status line.
+python3 - "$SHARED/settings.json" "$PROFILE/settings.json" "${ABL_MODEL:-abliterated-model-large-v2}" <<'PY'
+import json, sys
+src, dst, model = sys.argv[1:4]
+try:
+    d = json.load(open(src))
+except Exception:
+    d = {}
+d.pop("hooks", None)
+d.pop("model", None)   # the shared default (e.g. "fable") is not a gateway tier; the launch line or the opus tier decides
+d["statusLine"] = {"type": "command", "padding": 0,
+                   "command": "printf 'abliterated.ai · %s · %s' '" + model + "' \"$(basename \"$PWD\")\""}
+d.setdefault("env", {})["DISABLE_AUTOUPDATER"] = "1"
+json.dump(d, open(dst, "w"), indent=2)
+PY
+# first-run state: skip onboarding, carry over user-scope MCP servers from the main profile once.
+if [ ! -f "$PROFILE/.claude.json" ]; then
+  python3 - "$PROFILE/.claude.json" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.claude.json" <<'PY'
+import json, sys
+dst, seed = sys.argv[1:3]
+state = {"hasCompletedOnboarding": True, "autoUpdates": False, "installMethod": "native", "numStartups": 0}
+try:
+    main = json.load(open(seed))
+except Exception:
+    main = {}
+state["mcpServers"] = main.get("mcpServers", {})
+# carry over per-folder trust so it is not asked again for every project
+keep = ("hasTrustDialogAccepted", "allowedTools", "mcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers")
+state["projects"] = {path: {k: v for k, v in cfg.items() if k in keep}
+                     for path, cfg in main.get("projects", {}).items() if isinstance(cfg, dict)}
+json.dump(state, open(dst, "w"), indent=2)
+PY
+fi
+
+export CLAUDE_CONFIG_DIR="$PROFILE"
+export ANTHROPIC_BASE_URL="${ABL_BASE_URL:-https://api.abliteration.ai}"
+export ANTHROPIC_AUTH_TOKEN="${ABLITERATION_API_KEY:?ABLITERATION_API_KEY missing (copy .env.example to .env and fill it in)}"
+unset ANTHROPIC_API_KEY
+M="${ABL_MODEL:-abliterated-model-large-v2}"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$M"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$M"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$M"
+export ANTHROPIC_CUSTOM_MODEL_OPTION="$M"
+export ANTHROPIC_CUSTOM_MODEL_OPTION_NAME="$M"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export DISABLE_AUTOUPDATER=1
+exec claude "$@"
